@@ -1,0 +1,8 @@
+{
+  "name": "Remix Chubb Alarm Operator Sim",
+  "description": "Simulateur professionnel d\u0027appels d\u0027alarme pour opérateurs de centre de télésurveillance (ARC). Entraînement aux procédures de vérification de passcode, annulation, divulgation et escalade.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
