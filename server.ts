@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+// Disable HMR to prevent WebSocket transport errors in container/iframe
+process.env.DISABLE_HMR = 'true';
+
 import express from 'express';
 import dotenv from 'dotenv';
 import path from 'path';
@@ -20,6 +23,14 @@ const app = express();
 const PORT = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
 
 app.use(express.json());
+
+// Helper timeout to prevent hanging cloud API calls
+function withTimeout<T>(promise: Promise<T>, ms = 2500): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((_, reject) => setTimeout(() => reject(new Error('AI generation timeout')), ms)),
+  ]);
+}
 
 // Initialize GoogleGenAI server-side with required User-Agent header (optional when GEMINI_API_KEY is provided)
 let ai: GoogleGenAI | null = null;
@@ -92,40 +103,43 @@ STRICT BEHAVIOR RULES:
     const chatHistoryText = history.map((h: { sender: string; text: string }) => `${h.sender === 'operator' ? 'OPERATOR' : 'CLIENT'}: ${h.text}`).join('\n');
     const prompt = `CONVERSATION SO FAR:\n${chatHistoryText}\nOPERATOR JUST SAID: "${operatorMessage}"\n\nGenerate the client's next spoken reaction.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: prompt,
-      config: {
-        systemInstruction: systemPrompt,
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            reply: {
-              type: Type.STRING,
-              description: 'The spoken dialogue of the client in 1-2 concise sentences.',
+    const response = await withTimeout(
+      ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: prompt,
+        config: {
+          systemInstruction: systemPrompt,
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              reply: {
+                type: Type.STRING,
+                description: 'The spoken dialogue of the client in 1-2 concise sentences.',
+              },
+              passcodeMentioned: {
+                type: Type.STRING,
+                description: 'The exact passcode uttered by the client if any, otherwise null or empty string.',
+              },
+              isDuressWordUsed: {
+                type: Type.BOOLEAN,
+                description: 'True if the client uttered the secret duress/coercion passcode.',
+              },
+              sentiment: {
+                type: Type.STRING,
+                description: 'Current emotional state: calm, panicked, angry, relieved, confused, tense, or deceptive.',
+              },
+              proceduralObservations: {
+                type: Type.STRING,
+                description: 'Brief quality assessment note on the operator step so far.',
+              },
             },
-            passcodeMentioned: {
-              type: Type.STRING,
-              description: 'The exact passcode uttered by the client if any, otherwise null or empty string.',
-            },
-            isDuressWordUsed: {
-              type: Type.BOOLEAN,
-              description: 'True if the client uttered the secret duress/coercion passcode.',
-            },
-            sentiment: {
-              type: Type.STRING,
-              description: 'Current emotional state: calm, panicked, angry, relieved, confused, tense, or deceptive.',
-            },
-            proceduralObservations: {
-              type: Type.STRING,
-              description: 'Brief quality assessment note on the operator step so far.',
-            },
+            required: ['reply', 'sentiment', 'isDuressWordUsed'],
           },
-          required: ['reply', 'sentiment', 'isDuressWordUsed'],
         },
-      },
-    });
+      }),
+      2500
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     const fallback = generateSimulatedResponse({
@@ -198,41 +212,44 @@ EVALUATE AND RETURN JSON ONLY:
 - criticalBreaches: array of strings listing any critical security or procedural violations
 - debriefingNotes: detailed, constructive advice for the operator to improve their procedural reflexes.`;
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-3.8-flash',
-      contents: evaluationPrompt,
-      config: {
-        responseMimeType: 'application/json',
-        responseSchema: {
-          type: Type.OBJECT,
-          properties: {
-            score: { type: Type.INTEGER },
-            passed: { type: Type.BOOLEAN },
-            verdict: { type: Type.STRING },
-            checks: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                properties: {
-                  name: { type: Type.STRING },
-                  status: { type: Type.STRING },
-                  points: { type: Type.INTEGER },
-                  maxPoints: { type: Type.INTEGER },
-                  notes: { type: Type.STRING },
+    const response = await withTimeout(
+      ai.models.generateContent({
+        model: 'gemini-3.8-flash',
+        contents: evaluationPrompt,
+        config: {
+          responseMimeType: 'application/json',
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              score: { type: Type.INTEGER },
+              passed: { type: Type.BOOLEAN },
+              verdict: { type: Type.STRING },
+              checks: {
+                type: Type.ARRAY,
+                items: {
+                  type: Type.OBJECT,
+                  properties: {
+                    name: { type: Type.STRING },
+                    status: { type: Type.STRING },
+                    points: { type: Type.INTEGER },
+                    maxPoints: { type: Type.INTEGER },
+                    notes: { type: Type.STRING },
+                  },
+                  required: ['name', 'status', 'points', 'maxPoints', 'notes'],
                 },
-                required: ['name', 'status', 'points', 'maxPoints', 'notes'],
               },
+              criticalBreaches: {
+                type: Type.ARRAY,
+                items: { type: Type.STRING },
+              },
+              debriefingNotes: { type: Type.STRING },
             },
-            criticalBreaches: {
-              type: Type.ARRAY,
-              items: { type: Type.STRING },
-            },
-            debriefingNotes: { type: Type.STRING },
+            required: ['score', 'passed', 'verdict', 'checks', 'criticalBreaches', 'debriefingNotes'],
           },
-          required: ['score', 'passed', 'verdict', 'checks', 'criticalBreaches', 'debriefingNotes'],
         },
-      },
-    });
+      }),
+      2500
+    );
 
     const parsed = JSON.parse(response.text || '{}');
     return res.json(parsed);
@@ -260,7 +277,10 @@ async function startServer() {
   } else {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: false,
+      },
       appType: 'spa',
     });
     app.use(vite.middlewares);
